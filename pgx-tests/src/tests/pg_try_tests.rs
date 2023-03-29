@@ -67,7 +67,7 @@ mod tests {
     #[allow(unused_imports)]
     use crate as pgx_tests;
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
     use pgx::prelude::*;
 
@@ -187,6 +187,44 @@ mod tests {
         // finally block does run, even if a catch block throws
         assert_eq!(true, finally.load(Ordering::SeqCst));
         assert!(result.is_err());
+    }
+
+    #[pg_guard]
+    fn pg_try_finally_recursive_nested_nested(_caught: &AtomicI32, finally: &AtomicI32) {
+        PgTryBuilder::new(|| {
+            ereport!(ERROR, PgSqlErrorCode::ERRCODE_INTERNAL_ERROR, "errmsg");
+        })
+        .finally(|| {
+            finally.fetch_add(1, Ordering::SeqCst);
+        })
+        .execute();
+    }
+
+    #[pg_guard]
+    fn pg_try_finally_recursive_nested(caught: &AtomicI32, finally: &AtomicI32) {
+        PgTryBuilder::new(|| pg_try_finally_recursive_nested_nested(caught, finally))
+            .catch_others(|e| {
+                caught.fetch_add(1, Ordering::SeqCst);
+                e.rethrow()
+            })
+            .execute();
+    }
+
+    #[pg_test]
+    fn test_pg_try_finally_recursive() {
+        let caught = AtomicI32::new(0);
+        let finally = AtomicI32::new(0);
+        let result = std::panic::catch_unwind(|| {
+            PgTryBuilder::new(|| pg_try_finally_recursive_nested(&caught, &finally))
+                .catch_others(|e| {
+                    caught.fetch_add(1, Ordering::SeqCst);
+                    e.rethrow()
+                })
+                .execute()
+        });
+        assert!(result.is_err());
+        assert_eq!(caught.load(Ordering::SeqCst), 2);
+        assert_eq!(finally.load(Ordering::SeqCst), 1);
     }
 
     #[pg_test]
